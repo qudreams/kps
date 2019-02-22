@@ -292,7 +292,7 @@ out:
 }
 
 
-#define DEVICE_NAME     "kscandir"
+#define DEVICE_NAME     "kps"
 
 static int __init kps_init(void)
 {
