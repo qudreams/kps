@@ -11,12 +11,14 @@ ifeq ($(DEBUG), 1)
 	EXTRA_CFLAGS += -DDEBUG
 endif
 
+objs += task_ps.o kpath.o
+
 ifeq ($(KVER),$(shell uname -r))
     obj-m += kps.o
-	kps-objs := task_ps.o
+	kps-objs := $(objs)
 else
     obj-m += kps-$(KVER).o
-	kps-objs := task_ps.o
+	kps-objs := $(objs)
 endif
 
 all:

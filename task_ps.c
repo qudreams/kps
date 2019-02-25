@@ -13,12 +13,14 @@
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,18)
 #include <linux/fdtable.h>
 #endif
+#include "kpath.h"
 
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,23)
     #define PID(ts) task_tgid_vnr(ts)
 #else
     #define PID(ts) ((ts)->tgid)
 #endif
+
 
 pid_t kps_get_sid(struct task_struct* tsk)
 {
@@ -36,6 +38,123 @@ pid_t kps_get_sid(struct task_struct* tsk)
     return sid;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,26)
+    #ifdef CONFIG_MMU
+    static int get_task_exe(struct mm_struct* mm,struct path* path)
+    {
+        int rc = -ENOENT;
+        struct vm_area_struct * vma = NULL;
+
+        down_read(&mm->mmap_sem);
+    	vma = mm->mmap;
+    	while (vma) {
+    		if ((vma->vm_flags & VM_EXECUTABLE) && vma->vm_file)
+    			break;
+    		vma = vma->vm_next;
+    	}
+
+    	if (vma) {
+    		path->mnt = mntget(vma->vm_file->f_vfsmnt);
+    		path->dentry = dget(vma->vm_file->f_dentry);
+    		rc = 0;
+    	}
+    	up_read(&mm->mmap_sem);
+
+        return rc;
+    }
+    #else
+    static int get_task_exe(struct mm_struct* mm,struct path* path)
+    {
+        int rc = -ENOENT;
+        struct vm_list_struct *vml = NULL;
+        struct vm_area_struct *vma = NULL;
+
+        down_read(&mm->mmap_sem);
+        vml = mm->context.vmlist;
+    	while (vml) {
+    		if ((vml->vma->vm_flags & VM_EXECUTABLE) && vml->vma->vm_file) {
+    			vma = vml->vma;
+    			break;
+    		}
+    		vml = vml->next;
+    	}
+
+    	if (vma) {
+    		path->mnt = mntget(vma->vm_file->f_vfsmnt);
+    		path->dentry = dget(vma->vm_file->f_dentry);
+    		rc = 0;
+    	}
+
+    	up_read(&mm->mmap_sem)
+
+        return rc;
+    }
+    #endif
+#else
+    struct file *get_mm_exe_file(struct mm_struct *mm)
+    {
+        struct file *exe_file;
+
+        /* We need mmap_sem to protect against races with removal of
+         * VM_EXECUTABLE vmas */
+        down_read(&mm->mmap_sem);
+        exe_file = mm->exe_file;
+        if (exe_file)
+            get_file(exe_file);
+        up_read(&mm->mmap_sem);
+        return exe_file;
+    }
+
+    static int get_task_exe(struct mm_struct* mm,struct path* path)
+    {
+        int rc = -ENOENT;
+        struct file* exe_file = NULL;
+
+        exe_file = get_mm_exe_file(mm);
+    	if (exe_file) {
+            path_get(&exe_file->f_path);
+    		*path = exe_file->f_path;
+    		fput(exe_file);
+            rc = 0;
+    	}
+
+        return rc;
+    }
+#endif
+
+int kps_get_task_exe(struct task_struct* tsk,struct path* path)
+{
+    int rc = -EINVAL;
+    struct mm_struct* mm = NULL;
+
+    if(!tsk || !path) { return rc; }
+
+    rc = -ENOENT;
+    mm = get_task_mm(tsk);
+    if(!mm) { goto out; }
+
+    rc = get_task_exe(mm,path);
+    mmput(mm);
+
+out:
+    return rc;
+}
+
+static char* get_task_exe_path(struct task_struct* tsk,unsigned* len)
+{
+    int rc = -EINVAL;
+    struct path path;
+    char* pathname = NULL;
+
+    rc = kps_get_task_exe(tsk,&path);
+    if(rc) { return ERR_PTR(rc); }
+
+    pathname = kget_pathname(&path,len);
+    kpath_put(&path);
+
+    return pathname;
+}
+
 static int kps_get_cmdline(struct task_struct *task, char *buffer, int buflen);
 
 static void do_iterator_process(void)
@@ -44,6 +163,8 @@ static void do_iterator_process(void)
     pid_t pid = -1;
     pid_t pgrp = -1;
     pid_t psess = -1;
+    unsigned len = 0;
+    char* exe = ERR_PTR(-EINVAL);
 
     struct task_struct* p = NULL;
     char* cmdline = kcalloc(1,PAGE_SIZE,GFP_KERNEL);
@@ -79,11 +200,17 @@ static void do_iterator_process(void)
         if(res <= 0) { continue; }
         cmdline[res] = '\0';
 
+        exe = get_task_exe_path(p,&len);
+        if(IS_ERR(exe)) { continue; }
 
-        printk("pid: %d,pgrp: %d,session: %d,cmdline: %s\n",
-            pid,pgrp,psess,cmdline);
+        printk("exe: %s pid: %d,pgrp: %d,session: %d,cmdline: %s\n",
+            exe,pid,pgrp,psess,cmdline);
+
+        kput_pathname(exe);
     }
     rcu_read_unlock();
+
+    kfree(cmdline);
 }
 
 #ifdef CONFIG_MMU
